@@ -202,18 +202,62 @@ def train_cifar():
     return (idx_x >= low_x) * (idx_x < (low_x + mask_size)) * (idx_y >= low_y) * (idx_y < (low_y + mask_size))
 
   def random_crop(X:Tensor, crop_size=32):
-    mask = make_square_mask(X.shape, crop_size)
-    mask = mask.expand((-1,3,-1,-1))
-    X_cropped = Tensor(X.numpy()[mask.numpy()])
-    return X_cropped.reshape((-1, 3, crop_size, crop_size))
+    BS, C, H, W = X.shape
+    # Generate random top-left coordinates for each image in the batch
+    # Note: make_square_mask uses high=W-crop_size, implying coordinates up to W-crop_size-1.
+    # To access indices up to H-1 or W-1, low_y + (crop_size-1) = H-1 => low_y = H-crop_size.
+    # So, randint high should be H-crop_size+1 if exclusive, or H-crop_size if inclusive.
+    # Assuming Tensor.randint high is exclusive, like Python's random.randrange(start, stop).
+    low_x = Tensor.randint(BS, low=0, high=W-crop_size+1, dtype=dtypes.int32).reshape(BS,1,1,1)
+    low_y = Tensor.randint(BS, low=0, high=H-crop_size+1, dtype=dtypes.int32).reshape(BS,1,1,1)
+
+    # Create base indices for a single crop window
+    idx_H_base = Tensor.arange(crop_size, dtype=dtypes.int32).reshape(1, 1, crop_size, 1)
+    idx_W_base = Tensor.arange(crop_size, dtype=dtypes.int32).reshape(1, 1, 1, crop_size)
+
+    # Add offsets to base indices for each batch item
+    # indices_H will be (BS, 1, crop_size, 1)
+    # indices_W will be (BS, 1, 1, crop_size)
+    indices_H = low_y + idx_H_base
+    indices_W = low_x + idx_W_base
+
+    # Expand indices to match the dimensions needed for gather
+    # expanded_indices_H: (BS, C, crop_size, W) to select rows from X
+    # expanded_indices_W: (BS, C, crop_size, crop_size) to select columns from X_gathered_rows
+    expanded_indices_H = indices_H.expand(BS, C, crop_size, W)
+    expanded_indices_W = indices_W.expand(BS, C, crop_size, crop_size) # crop_size for the dimension being gathered from X_gathered_rows
+
+    # Gather along H dimension (rows)
+    # X_gathered_rows will have shape (BS, C, crop_size, W)
+    X_gathered_rows = X.gather(expanded_indices_H, dim=2)
+
+    # Gather along W dimension (columns) from the result of H-gathering
+    # X_cropped will have shape (BS, C, crop_size, crop_size)
+    X_cropped = X_gathered_rows.gather(expanded_indices_W, dim=3)
+
+    return X_cropped
 
   def cutmix(X:Tensor, Y:Tensor, mask_size=3):
     # fill the square with randomly selected images from the same batch
     mask = make_square_mask(X.shape, mask_size)
     order = list(range(0, X.shape[0]))
     random.shuffle(order)
-    X_patch = Tensor(X.numpy()[order], device=X.device, dtype=X.dtype)
-    Y_patch = Tensor(Y.numpy()[order], device=Y.device, dtype=Y.dtype)
+
+    # Convert shuffled order to a tensor for gather
+    # Ensure order_tensor is on the same device as X and Y for gather.
+    order_tensor = Tensor(order, dtype=dtypes.int32, device=X.device)
+
+    # Create X_patch using gather
+    BS_X, C_X, H_X, W_X = X.shape
+    idx_x_gather = order_tensor.reshape(BS_X, 1, 1, 1).expand(BS_X, C_X, H_X, W_X)
+    X_patch = X.gather(idx_x_gather, dim=0)
+
+    # Create Y_patch using gather
+    # Y is typically (BS, num_classes)
+    BS_Y, N_CLASSES_Y = Y.shape
+    idx_y_gather = order_tensor.reshape(BS_Y, 1).expand(BS_Y, N_CLASSES_Y)
+    Y_patch = Y.gather(idx_y_gather, dim=0)
+
     X_cutmix = mask.where(X_patch, X)
     mix_portion = float(mask_size**2)/(X.shape[-2]*X.shape[-1])
     Y_cutmix = mix_portion * Y_patch + (1. - mix_portion) * Y
@@ -236,16 +280,25 @@ def train_cifar():
             X, Y = cutmix(X, Y, mask_size=hyp['net']['cutmix_size'])
         order = list(range(0, X.shape[0]))
         random.shuffle(order)
-        X, Y = X.numpy()[order], Y.numpy()[order]
-      else:
-        X, Y = X.numpy(), Y.numpy()
+        # Shuffle X and Y using tinygrad.gather
+        order_tensor = Tensor(order, dtype=dtypes.int32, device=X.device)
+
+        idx_x_gather = order_tensor.reshape(X.shape[0], 1, 1, 1).expand(X.shape[0], X.shape[1], X.shape[2], X.shape[3])
+        X = X.gather(idx_x_gather, dim=0)
+
+        idx_y_gather = order_tensor.reshape(Y.shape[0], 1).expand(Y.shape[0], Y.shape[1]) # Y is (BS, N_CLASSES)
+        Y = Y.gather(idx_y_gather, dim=0)
+      # else: X and Y remain Tensors, no .numpy() conversion needed
+      
       et = time.monotonic()
       print(f"shuffling {'training' if is_train else 'test'} dataset in {(et-st)*1e3:.2f} ms ({epoch=})")
       for i in range(0, X.shape[0], BS):
         # pad the last batch  # TODO: not correct for test
         batch_end = min(i+BS, Y.shape[0])
-        x = Tensor(X[batch_end-BS:batch_end], device=X_in.device, dtype=X_in.dtype)
-        y = Tensor(Y[batch_end-BS:batch_end], device=Y_in.device, dtype=Y_in.dtype)
+        # X and Y are now tinygrad Tensors. Slicing them directly yields tinygrad Tensors.
+        # The device and dtype should be preserved from the original X, Y (and thus X_in, Y_in).
+        x = X[batch_end-BS:batch_end]
+        y = Y[batch_end-BS:batch_end]
         step += 1
         yield x, y
       epoch += 1
