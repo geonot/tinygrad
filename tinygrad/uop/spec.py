@@ -84,6 +84,15 @@ tensor_uop_spec = buffer_spec+assign_spec+PatternMatcher([
   (UPat(Ops.COPY, name="copy", src=(UPat.var("x"), UPat(Ops.DEVICE)), arg=None), lambda copy,x: copy.dtype == x.dtype),
   (UPat(Ops.ALLREDUCE, name="red", src=(UPat.var("x"), UPat(Ops.DEVICE))), lambda red,x: red.dtype == x.dtype and isinstance(red.arg, Ops)),
   (UPat(Ops.MULTI, name="multi"), lambda multi: all(x.dtype == multi.dtype for x in multi.src) and isinstance(multi.arg, int)),
+  (UPat(Ops.CAT, name="cat", allow_any_len=True), # allow_any_len=True because src is a tuple of UOps
+   lambda cat: isinstance(cat.arg, int) and \
+               len(cat.src) > 0 and \
+               all_same(tuple(len(x.shape) for x in cat.src)) and \
+               all(x.dtype == cat.src[0].dtype for x in cat.src[1:]) and \
+               all(s1 == s2 for i in range(len(cat.src[0].shape)) if i != cat.arg \
+                   for t2_lazydata in cat.src[1:] \
+                   for s1,s2 in [(cat.src[0].shape[i], t2_lazydata.shape[i])])
+  ),
 ])
 
 # ***** uop type spec *****

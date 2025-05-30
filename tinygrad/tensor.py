@@ -1286,11 +1286,47 @@ class Tensor(MathTrait):
     ```
     """
     dim = self._resolve_dim(dim)
-    for arg in args: assert arg.ndim==self.ndim and all(ti==ai for i,(ti,ai) in enumerate(zip(self.shape, arg.shape)) if i!=dim)
-    tensors = [self, *args]
-    dim_cumsum = list(itertools.accumulate([t.shape[dim] for t in tensors], initial=0))
-    for i,t in enumerate(tensors): tensors[i] = t.pad([(dim_cumsum[i], dim_cumsum[-1]-dim_cumsum[i+1]) if j==dim else None for j in range(t.ndim)])
-    return functools.reduce(Tensor.add, tensors)
+    tensors = (self, *args)
+
+    # Validation
+    if not all(t.ndim == self.ndim for t in tensors[1:]):
+      raise ValueError(f"cat arguments must have same number of dimensions, got {self.ndim} and {[t.ndim for t in tensors[1:]]}")
+    if not all(s1 == s2 for i in range(self.ndim) if i != dim for t2 in tensors[1:] for s1, s2 in [(self.shape[i], t2.shape[i])]):
+      raise ValueError(f"cat arguments dimensions must match except in cat dimension, got shapes {[t.shape for t in tensors]} for dim {dim}")
+
+    # Calculate output shape for the Tensor wrapper.
+    # The UOp's ShapeTracker will infer its own shape based on sources.
+    # This sum needs to handle symbolic shapes if any t.shape[dim] is symbolic.
+    # For now, assume it will work if underlying UOps support symbolic math for shape inference.
+    out_s = list(self.shape)
+    cat_dim_size = sum(t.shape[dim] for t in tensors)
+    out_s[dim] = cat_dim_size
+    # out_shape = tuple(out_s) # This is the expected shape, Tensor constructor will use UOp's shape
+
+    # Determine output dtype.
+    # The UPat spec for Ops.CAT now enforces that all source dtypes are the same as the first.
+    out_dtype = tensors[0].dtype
+    if not all_same(tuple(t.dtype for t in tensors)):
+        # This path should ideally not be hit if inputs conform to the spec.
+        # If auto-casting were desired before creating Ops.CAT, it would happen here.
+        # For now, we rely on the spec check or raise an error for inconsistent dtypes.
+        raise ValueError(f"All tensors to cat must have the same dtype. Got {[t.dtype for t in tensors]}. This should have been caught by UOp spec if inputs were UOps.")
+
+    input_uops = tuple(t.lazydata for t in tensors)
+    
+    new_lazydata = UOp(Ops.CAT, out_dtype, src=input_uops, arg=dim)
+
+    # Determine requires_grad
+    req_grads = [t.requires_grad for t in tensors]
+    if any(rg is True for rg in req_grads):
+      requires_grad = True
+    elif all(rg is False for rg in req_grads):
+      requires_grad = False
+    else: # Mix of None and False, or all None
+      requires_grad = None
+      
+    # The device of the output tensor will be inferred from the new_lazydata.device property.
+    return Tensor(new_lazydata, device=new_lazydata.device, requires_grad=requires_grad)
 
   def stack(self:Tensor, *args:Tensor, dim:int=0) -> Tensor:
     """

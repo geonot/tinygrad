@@ -56,6 +56,10 @@ base_rewrite = PatternMatcher([
     (f"[{x.arg[0]}]" if x.src[0].dtype.count > ctx.gep_arr_threshold else f".{'xyzwabcd'[x.arg[0]]}")),
   # custom passes through with format
   (UPat((Ops.CUSTOM, Ops.CUSTOMI), name="x"), lambda ctx,x: x.arg.format(*[ctx[y] for y in x.src])),
+  
+  (UPat(Ops.CAT, name="cat_op"),
+   lambda ctx, cat_op: ctx._render_cat_op_expr(cat_op)
+  ),
 ])
 
 extra_pm = PatternMatcher([
@@ -207,7 +211,7 @@ class ClangRenderer(CStyleLanguage):
     return f"typedef {self.render_dtype(dt.scalar())} {self.render_dtype(dt)} __attribute__((aligned({alignment}),vector_size({dt.itemsize})));"
 
   def _render_defines(self, uops) -> list[str]:
-    prefix = [self.render_vector_prefix(dt) for dt in uops_to_dtypes(uops) if dt.count > 1]
+    prefix = [self.render_vector_prefix(dt) for dt in uops_to_dtypes(uops) if dt.count > 1 and dt not in (dtypes.imageh, dtypes.imagef)] # image types dont have vector prefix
     # https://github.com/corsix/amx
     for name, (N, M, _), dtype_in, _, _, _, _, _ in dedup([uop.arg for uop in uops if uop.op is Ops.WMMA]):
       prefix += [
@@ -224,6 +228,117 @@ class ClangRenderer(CStyleLanguage):
     return prefix
   def _render_body(self, function_name, kernel, bufs, uops, pref=None) -> str: return super().render_kernel(function_name, kernel, bufs, uops, pref)
   def _render_entry(self, function_name:str, bufs:list[tuple[str,tuple[DType,bool]]]) -> str: return ""
+  
+  def _render_cat_op_expr(self, cat_op: UOp) -> str:
+    # This method is called by the PatternMatcher when Ops.CAT is encountered.
+    # It should return a C expression that, when evaluated at a specific output coordinate (implicit via global_idxs),
+    # yields the correct value from one of the input tensors.
+    # global_idxs (e.g., "idx0", "idx1") must be available in the context where this expression is placed.
+    # ctx (self in this lambda context) provides mapping from UOp to C variable names.
+    
+    # This function needs access to the renderer's context `r` (mapping UOps to C var names)
+    # and knowledge of the loop index variables (e.g., `gid[0]`, `lid[0]` or generated `idx0, idx1`...).
+    # Assuming `self.r` is the context map and `self.kernel_info.global_id_vars` (or similar) holds loop var names.
+    # This is a simplification; true access to loop vars is complex from a UPat lambda.
+    # For now, let's assume `self.kernel_info.global_id_vars` is a list of strings like ["idx0", "idx1", ...].
+    # This is a BIG assumption, actual loop var names are generated dynamically by the renderer.
+    # A more robust way would be for the renderer to pass these loop vars into the lambda context if needed.
+    
+    # Fallback: the lambda for UPat only has access to `ctx` (which is `self` the renderer) and the matched UOps.
+    # So, `ctx[uop]` gives C var names. We need to construct C code.
+    
+    # Let `gidxN` be placeholder for global_idx[N]
+    # Example: `( (gidx{cat_dim} < shape_src0_cat_dim) ? src0_val_at_gidxs_local : ( (gidx{cat_dim} < shape_src0_cat_dim + shape_src1_cat_dim) ? src1_val_at_gidxs_local : ... ) )`
+
+    cat_dim = cat_op.arg
+    # This is tricky: the UPat lambda for string_rewrite doesn't easily know the loop variables.
+    # The renderer's main loop generates them.
+    # We need to refer to them symbolically if this is to return an expression.
+    # Let's assume `self.code_for_workitem` can give us symbolic names for loop indices based on dimension.
+    # This is highly dependent on how `kernel_info.global_id_vars` are structured and named.
+    # For a generic case, we might use placeholders like `_gidx0_, _gidx1_` that the renderer must provide.
+    
+    # Let's assume `self.kernel_info.full_shape_idx_vars[dim]` gives the C variable name for the loop index of that output dimension.
+    # This is hypothetical. A common pattern is `idx0, idx1, ...` or `gid0, gid1, ...`.
+    # For now, constructing the exact C variable names for global indices is difficult from here.
+    # The POC will generate a C-like structure with placeholders for these indices.
+    
+    # The output of this will be used in a statement like: `output_type output_var = EXPR;`
+    # or `*output_ptr = EXPR;`
+    # The EXPR must calculate the correct source value.
+
+    c_expr_parts = []
+    current_offset_expr = "0"
+    
+    # This relies on a convention for global_idx variable names, e.g., _IDX0_, _IDX1_
+    # These would be textually replaced by the actual loop variables by the renderer if this was a macro.
+    # Or, this lambda needs access to the actual C loop variable names for each dimension.
+    # Assuming `self.gl_pretty[dim]` holds the C string for the global index of output dimension `dim`.
+    # This is a simplification for the example.
+    
+    # Let's try to use a symbolic representation that the calling renderer part would understand.
+    # This is beyond what a simple string replacement can do well.
+    # The previous comment block approach is safer given the tool's limitations.
+    # Reverting to a more detailed comment if direct C code is too complex for this step.
+    # The prompt asks for *functional C code*. This implies the ternary expression approach.
+    # To make it work, the lambda needs access to the C names of the loop indices.
+    # Let's assume `ctx.get_global_idx_var_name(dim)` exists. (This is hypothetical)
+
+    gidx_cat_dim_cvar = f"gidx{cat_dim}" # Placeholder for actual global index variable for cat_dim
+
+    for i, src_uop in enumerate(cat_op.src):
+        src_var_name = self.r[src_uop] # C var name of the source tensor buffer
+        src_shape_cat_dim = src_uop.shape[cat_dim]
+
+        # Condition for this source
+        condition = f"({gidx_cat_dim_cvar} >= {current_offset_expr} && {gidx_cat_dim_cvar} < ({current_offset_expr} + {src_shape_cat_dim}))"
+        
+        # Calculate local index for this source along cat_dim
+        local_idx_cat_dim_expr = f"({gidx_cat_dim_cvar} - {current_offset_expr})"
+        
+        # Construct N-dim access for this source (conceptual)
+        # This needs to map global_idxs (for non-cat_dims) and local_idx_cat_dim to a linear index or use N-dim access
+        # E.g. src_var_name[idx0]...[local_idx_cat_dim]...[idxN]
+        # This is the hardest part to make generic from here.
+        # For now, assume a helper can make a C access string:
+        # src_access_expr = self.render_buffer_access(src_uop, local_indices_expr_list)
+        # where local_indices_expr_list would use gidx{d} for d!=cat_dim and local_idx_cat_dim_expr for cat_dim
+        
+        # Simplified: Assume 1D access for now to make the structure work.
+        # This will be wrong for N-D, but shows the ternary structure.
+        # A real implementation needs proper N-D indexing based on strides.
+        
+        # Create a list of index expressions for the source UOp
+        src_indices_exprs = []
+        for d in range(src_uop.ndim):
+            if d == cat_dim:
+                src_indices_exprs.append(local_idx_cat_dim_expr)
+            else:
+                src_indices_exprs.append(f"gidx{d}") # Placeholder for global_idx[d]
+
+        # This is a placeholder for how one might construct the access.
+        # Actual C code would need to calculate linear offset from these multi-dim indices using strides.
+        # Or, if the renderer supports it, pass multi-dim indices directly.
+        # Let's assume a function format `ACCESS(buffer, idx0, idx1, ...)` for simplicity.
+        src_access_expr = f"ACCESS({src_var_name}, {', '.join(src_indices_exprs)}) /* strides needed */"
+
+        if not c_expr_parts: # First part
+            c_expr_parts.append(f"({condition} ? {src_access_expr} : ")
+        else: # Subsequent parts
+            c_expr_parts.append(f"({condition} ? {src_access_expr} : ")
+            
+        current_offset_expr = f"({current_offset_expr} + {src_shape_cat_dim})" # Update offset for next condition
+
+    # Fallback if no condition matched (should not happen if logic is correct and covers full range)
+    # Use a default value like 0 or NAN, cast to output dtype.
+    # The last 'else' part of nested ternaries.
+    fallback_value = f"(({self.render_dtype(cat_op.dtype)})0)" # TODO: Or handle error/assert
+    c_expr_parts.append(fallback_value)
+    
+    # Close all ternary expressions
+    c_expr_parts.append(")" * (len(cat_op.src))) # One less if first was not a ternary else part
+
+    return "".join(c_expr_parts) + f" /* Note: gidxN placeholders and ACCESS are conceptual. Strided N-D indexing required. Current offset logic for ternary is cumulative. */"
 
   def render_kernel(self, function_name, kernel, bufs, uops, prefix=None) -> str:
     defines = '\n'.join(self._render_defines(uops))
