@@ -72,8 +72,8 @@ base_rewrite = PatternMatcher([
    f"  br label {ctx[x]}_exit\n{ctx[x][1:]}_exit:\n"
    f"  {ctx[x]} = phi {ldt(x.dtype)} [{ctx[x]}_yes, {ctx[x]}_load], [{ctx[alt]}, {ctx[x]}_entry]"),
   (UPat(Ops.LOAD, src=(UPat.var('idx'),), allow_any_len=True, name="x"),
-   lambda ctx,x,idx: f"  {ctx[x]} = load {ldt(x.dtype)}, {ldt(idx.dtype)} {ctx[idx]}"),
-  (UPat(Ops.STORE, name="x"), lambda ctx,x: f"  store {ldt(x.src[1].dtype)} {ctx[x.src[1]]}, {ldt(x.src[0].dtype)} {ctx[x.src[0]]}"),
+   lambda ctx,x,idx: f"  {ctx[x]} = load {ldt(x.dtype)}, {ldt(idx.dtype)} {ctx[idx]}, align {x.dtype.itemsize}"), # Added alignment
+  (UPat(Ops.STORE, name="x"), lambda ctx,x: f"  store {ldt(x.src[1].dtype)} {ctx[x.src[1]]}, {ldt(x.src[0].dtype)} {ctx[x.src[0]]}, align {x.src[1].dtype.itemsize}"), # Added alignment based on value's dtype
 
   # GEP/VECTORIZE/CAST for float4 support
   (UPat(Ops.GEP, name="x"), lambda ctx,x: f"  {ctx[x]} = extractelement {ldt(x.src[0].dtype)} {ctx[x.src[0]]}, i32 {x.arg[0]}"),
