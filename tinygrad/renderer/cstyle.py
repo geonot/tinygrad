@@ -104,6 +104,9 @@ class CStyleLanguage(Renderer):
   string_rewrite = base_rewrite
   extra_matcher = extra_pm
 
+  def __init__(self):
+    self.type_map = self.type_map.copy()
+
   def render_kernel(self, function_name:str, kernel:list[str], bufs:list[tuple[str,tuple[DType,bool]]], uops:list[UOp], prefix=None) -> str:
     tmp = "const sampler_t smp = CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST;\n" if any(isinstance(dtype, ImageDType) for _,(dtype,_) in bufs) else ""  # noqa: E501
     buftypes = [(name, self.render_dtype(dtype, mutable)+self.buffer_suffix if isinstance(dtype, (ImageDType, PtrDType)) else
@@ -231,6 +234,12 @@ class ClangRenderer(CStyleLanguage):
 
 class OpenCLRenderer(CStyleLanguage):
   device = "GPU"
+  def __init__(self, device=None):
+    self.device = device
+    super().__init__()
+    if self.device and 'cl_khr_fp16' not in self.device.device_exts:
+      self.type_map[dtypes.half] = "float"
+      self.extra_matcher = PatternMatcher([(UPat(dtype=dtypes.half, name="x"), lambda x: x.cast(dtypes.float))]) + self.extra_matcher
 
   # language options
   kernel_typedef = "__kernel void"
@@ -255,7 +264,8 @@ class OpenCLRenderer(CStyleLanguage):
   ]) + base_rewrite
 
   def render_kernel(self, function_name, kernel, bufs, uops, prefix=None) -> str:
-    if any(uop.dtype.base == dtypes.half for uop in uops): prefix = (["#pragma OPENCL EXTENSION cl_khr_fp16 : enable"] + (prefix or []))
+    if self.device and 'cl_khr_fp16' in self.device.device_exts and any(uop.dtype.base == dtypes.half for uop in uops):
+      prefix = (["#pragma OPENCL EXTENSION cl_khr_fp16 : enable"] + (prefix or []))
     return super().render_kernel(function_name, kernel, bufs, uops, prefix)
 
 class IntelRenderer(OpenCLRenderer):
