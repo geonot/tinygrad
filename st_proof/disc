@@ -1,0 +1,378 @@
+On the Mergeability of arbitrary ShapeTrackers #8511
+Open
+@a-soulspark
+Description
+a-soulspark
+opened on Jan 5, 2025 · edited by a-soulspark
+
+Heyo, I'd like to propose a new formulation and a proof of the view merging problem which I haven't seen anyone mention yet. I have seen a formulation by person called @Nielius but sadly it was not continued to the point of having a proof.
+
+So I build from a similar starting ground, but with one main difference: I represent strides as vectors, and the views as a dot product between the stride and the input.
+
+TL;DR: Assuming no masks, using floor and modular arithmetic, we can define a sufficient condition for mergeability. Likely necessary as well, but feel free to show counter-examples if you can think of any. I hope to further formalize this in the upcoming days!
+Formulation
+
+With a pair of n-dimensional shape tuple s and stride vector σ , we can define a view as a function that goes from a n-dimensional tuple of natural numbers, constrained by s , to a single natural number:
+
+v : I s → N v ( x ) = σ ⋅ x
+
+where I s is the set of possible coordinate tuples:
+
+I s = ( x 1 , … , x n ) ∈ N n ∣ 0 ≤ x i < s i
+
+NOTE: Like above, I will refer to "tuples of indices" as coordinates to differentiate those from an "index" that represents a location in memory.
+We also define the contiguous stride for a shape s as the stride σ s such that
+
+σ i s = ∏ j = i + 1 n s j ,  where  σ n s = 1
+
+The unravel function is defined as a function that goes in the reverse direction of the view: it receives a single index and converts it into coordinates for a given shape tuple s .
+
+U s : N → I s U s ( k ) = ( U 1 s ( k ) , … , U n s ( k ) )
+
+The definition of unravel is complex, so it is best to look at it coordinate-by-coordinate:
+
+U i s ( k ) = ⌊ k σ i s ⌋ mod s i
+
+where σ i s is the contiguous stride for s , ⌊ ⌋ represents the floor function, and mod s i represents taking the remainder of the division of left side by s i .
+
+This complicated function is at the heart of the problem... but we can work it to learn when merging is possible.
+
+Finally, we can define the composition of two arbitrary views v , w with shapes s , s ′ and strides σ , σ ′ respectively, as the shape tracker T , where
+
+T : I s → N T ( x ) = ( w ∘ U s ′ ∘ v ) ( x ) = σ ′ ⋅ ( U s ′ ( σ ⋅ x ) )
+
+The problem statement becomes clear now: Is it possible to represent an arbitrary shape tracker T directly as a view? That is, our goal is to define a view M with shape s and a stride σ M which can replace the composite T :
+
+T ( x ) = M ( x ) = σ M ⋅ x
+
+The advantage of formulating the views as dot products is that the problem becomes a lot more obvious: We'd like to express our shape tracker as a view M which is a simple linear combination of the input coordinates.
+
+This is not trivial due to what's in the middle of the composition: the unravel function, which is not linear. However, its composition with the stride of the first view, U s ′ ∘ v , occasionally is linear, and I argue that it is precisely in those cases that the merging of the two views is possible.
+
+I'd also like to point out that I have not yet explored masks and how they affect the problem, but from my first thoughts on it, it appears that they only open up more possibilities for merging rather than excluding merges that would otherwise be possible.
+
+With this preamble, our next goal becomes clear: to prove in what cases is U s ′ ∘ v linear.
+Proof of mergeability
+
+We can kick start this proof by noting that U s ′ ∘ v is only linear if all its coordinate functions U i s ′ ∘ v also are. Therefore, we can build a case for it by analyzing each coordinate function individually.
+
+Recall that the unravel function for a coordinate i is defined as
+
+U i s ′ ( k ) = ⌊ k σ i s ′ ⌋ mod s i ′
+
+We can compose it with our first view function to get
+
+( U i s ′ ∘ v ) ( x ) = ⌊ σ ⋅ x σ i s ′ ⌋ mod s i ′
+
+This function is made up of two parts: first, the floor division, and secondly, the modulo. If we would like the function as a whole to be linear, we also need its individual components to act as such, since they are not inverses.
+Floor
+
+The floor function has a few interesting properties, but the most relevant here is of course, its linearity.
+
+The floor of a weighted sum of integer coordinates is linear if and only if the weights are also integers, or if the decimal part of the weights that aren't integers cannot exceed 1 , regardless of the values of the coordinates. In our case, using f r a c to denote the fractional part of a real number, we have
+
+∑ j = 1 n f r a c ( σ j σ i s ′ ⋅ x j ) < 1 ,   ∀ x ⟺ ∑ j = 1 n f r a c ( σ j σ i s ′ ) ⋅ x j < 1 ,   ∀ x
+
+since we know the coordinates are whole. But we also know that our coordinates are bound by their shape (or masks): 0 ≤ x j ≤ s j − 1 . We can then simplify the above expression by focusing on the worst cases to consider, where coordinates are maximal:
+
+∑ i = 1 n f r a c ( σ i σ i s ′ ) ⋅ ( s i − 1 ) < 1
+
+Also, since the weight is a division by another number, we can replace the fractional part for the more convenient division remainder (modulo), and now ensure that the sum of those remainders does not exceed the divisor, rather than 1.
+
+With this, we get our first condition for linearity:
+
+∑ i = 1 n m o d ( σ i , σ i s ′ ) ⋅ ( s i − 1 ) < σ i s ′
+
+If this condition is met, we know that the result of the floor will act as a linear combination of x , also allowing us to discard any decimal parts which never add up to one. This is a strong step forward, which leaves us with the other half: finding in which cases the modulo also acts as a linear function.
+Modulo
+
+Refresher on the coordinate unravel function:
+
+( U i s ′ ∘ v ) ( x ) = ⌊ σ ⋅ x σ i s ′ ⌋ mod s i ′
+
+For the modulo function, it is interesting to note that within [ 0 , s i ) , it acts as the identity, which is indeed linear. If we ever allow values that step outside that range, however, we are subject to non-linearity, thus making merging impossible.
+(For example, 2 mod 4 = 2 , 2 + 1 mod 4 = 3 , but 2 + 2 mod 4 = 0 )
+
+This way, we need to impose a second condition, after applying the floor division: we must ensure that the inputs to the modulo are never non-linear.
+
+As stated above, if the floor condition for linearity is met, it can be considered a linear combination of x , that is,
+
+⌊ σ ⋅ x σ i s ′ ⌋ = a ⋅ x = a 1 x 1 + ⋅ + a n x n ,  for some vector  a .
+
+We can then define our modulo as a ⋅ x mod s i , and that means we do not want a ⋅ x to exceed the value of the modulus, s i , if we'd like to maintain linearity.
+
+For example, if s 2 ′ = 12 and a 2 = 3 , then there cannot be any x 2 such that 3 x 2 ≥ 12 , so x 2 < 4 (In this case, it also implies that if s 2 > 4 , we'd know the views cannot merge!)
+
+As it turns out, however, it is fine that it exceeds the modulus; it just cannot wrap back. What that means is that, for example, if s 2 = 12 but a 2 = 15 , this is equivalent to the example above, as the result of the modulo is the same in both cases (comes from modular arithmetic).
+
+This calls for defining a wrapped version of a , which I creatively denote as b , defined for each input coordinate j as
+
+b j = m o d ( a j , s i ′ )
+
+Therefore, we can define a general condition under which the modulo will also behave as a linear combination of the input coordinates:
+
+∑ j = 1 n ( s j − 1 ) ⋅ b < s i ′
+
+Elegantly, this second condition is very similar to the first condition, but it now concerns a different modulo and the new weights after the floor division, a . We can write it in a form that very closely resembles that:
+
+∑ j = 1 n ( s j − 1 ) ⋅ m o d ( a j , s i ′ ) < s i ′
+
+So, summarizing the proof above, we found two conditions with which it can be proven that the two shapes are mergeable. That means these conditions are sufficient for mergeability, as both of them being met implies that the unravel function is linear in its behavior, and therefore, the entire shape tracker is a composition of linear functions, which can be reduced to a single one: the merge stride σ M .
+Recovery of the merge
+
+The best part is that, in the process of testing these conditions, we also happen to obtain exactly the values for that σ M . Each of the vectors b we found above form a row of a matrix B , which represents the entire composition ( U s ′ ∘ v ) . Therefore, we can find our merge stride via a small matrix multiplication:
+
+σ M = σ ′ B
+
+Expanding this, we have
+
+σ M = σ 1 ′ B 1 + ⋯ + σ m ′ B m
+
+where B i corresponds to the vector b found for the coordinate unravel function U i s ′ .
+
+The only part that is left to be proven is that these conditions are not just sufficient, but necessary. My intuition tells me that this proof is somewhat of a granted, as the conditions posed were exactly those that would allow those functions to display linear behavior.
+
+On top of that, I ran some small-scale experiments in the range of tens of thousands of randomly-generated pairs of views and attempted to merge them. In cases where the above conditions stated that a merge was possible, the merge indeed succeeds, and if it claims it should fail, then attempting to use the merge stride as described above indeed leads to conflicts (which was not the case with my initial formulation, which was wrong).
+
+However, once again, it does not entirely disprove that a merge is possible, as in, I am not sure if this proof serves as a necessary condition. This, plus masks, would require a couple more days of thinking, and also to fully formalize it in Lean.
+
+Still, I'm curious to hear your thoughts on this. I skimmed through the source, and I couldn't find this approach in it; however, it seems you already handle merges pretty well from the experiments I ran. Is that intuition somehow already present in your codebase? Maybe the proof can be simplified?
+
+Also, feel free to tell me if you find counter-examples of views you know that can be merged but that my theory says otherwise!
+Activity
+Nielius
+Nielius commented on Jan 6, 2025
+Nielius
+on Jan 6, 2025
+
+Hey @a-soulspark , thanks for this write-up!
+
+I actually continued working on a proof and have started formalizing it in Lean4, but that is actually a lot of work, IMO. I haven't read your post in enough detail yet (and I need to go in 5 minutes) to be entirely sure, but I think the conditions you're giving aren't necessary (even forgetting about masks and offsets --- so far I have been ignoring those too).
+
+Can you test your conditions on this example?
+
+st1 = ShapeTracker((View.create((10, 9, 4), (8 * 11 + 4 * 13, 11, 13), 0, None), View.create((6,), (9,), 0, None)))
+st_simplfied = ShapeTracker((View.create((6,), (2 * 11 + 13,), 0, None), ))
+
+The main additional difficulty that I found that I think your proof doesn't address (but like I said, I haven't read it in enough detail yet to be sure), is that you don't necessarily need U s ′ ( σ ⋅ x ) to be linear, because the strides in σ ′ can "accidentally coincide" in a way to make the entire view mergeable. The example above uses that.
+
+(Note: this paragraph above is vague --- I can explain it in more detail later. But the instance I gave above is an example of this issue.)
+
+I also used the formulation as an inner product btw (which is basically the same as what I wrote in my original post). E.g. these are some of my definitions:
+
+image
+
+and this is a proof that the unravel function U s is the inverse of the index function for σ s :
+
+image
+
+We could consider teaming up on the Lean4 formalization, btw. I've now spent around 4 days on that and still have some ways to go... I was familiar with Coq, but not with Lean4, so that slowed me down, but I still think it's a pretty big effort.
+
+tl;dr: thanks for the write-up; could you please check the example I gave, because I think it shows your conditions aren't necessary, but I need to go and will check later today
+a-soulspark
+a-soulspark commented on Jan 6, 2025
+a-soulspark
+on Jan 6, 2025
+Author
+
+heyo! I tested your example, and it is true: my conditions are too restrictive and they do not account for that.
+Interestingly, however, I noticed that despite that, the value of σ M I obtained from the method I described still works, even if my conditions falsely claim it wouldn't.
+
+This made me curious to see if it was the case that, if two views are mergeable, then the merge stride has to be given by what I described, and I managed to successfully prove that.
+
+What's left to prove is in which conditions that they are mergeable, because it is clear from your counter-example that mine are too strict. However, I am confident it is very possible, and only would require a few adjustments from what we already have.
+
+As for formalization in Lean, I'd love to help! Your code is interesting, but it's worth pointing out, I went into this also as an opportunity to finally properly learn the language, so I'd likely not be of immediate help at first.
+Proof for merge stride
+
+For clarity, I'll denote by σ B the stride obtained from the method described, as we do not know at first if it is the merge stride. Reversing the results of my proof:
+
+σ B ⋅ x = ( σ ′ B )   x = ( ∑ i = 1 m σ i ′ B i ) x = ∑ i = 1 m ∑ j = 1 n σ i ′   b j , i   x j = ∑ i = 1 m σ j ′ ∑ j = 1 n m o d ( ⌊ σ j σ i s ′ ⌋ , s i ′ ) x j
+
+Now, assume T is mergeable. In other words,
+
+∃ σ M : T ( x ) = σ M ⋅ x , ∀ x ∈ I s
+
+Our goal is to prove that σ M = σ B .
+
+Firstly, I'll point out that if strides are canonical (as in, s i = 1 ⟹ σ i = 0 ) they are unique.
+Therefore, we can assume (without loss of generality) canonical σ M , which is thus unique.
+
+From expanding their formulas, we know that for vectors ( 0 , … , 0 , x j , 0 , … , 0 ) , we have
+
+σ j B ⋅ x j = ∑ i = 1 m σ i ′ ⋅ m o d ( ⌊ σ j σ i s ′ ⌋ , s i ′ ) x j   σ j M ⋅ x j = T ( ( 0 , … , x j , … , 0 ) ) = ∑ i = 1 m σ i ′ ⋅ m o d ( ⌊ σ j x j σ i s ′ ⌋ , s i ′ )
+
+We also know that σ B behaves similarly to σ M for coordinates equal to 0 or 1.
+
+x j = 0 ⟹ σ j B ⋅ 0 = σ j M ⋅ 0 = 0 x j = 1 ⟹ σ j B ⋅ 1 = ∑ i = 1 m σ i ′ ⋅ m o d ( ⌊ σ j σ i s ′ ⌋ , s i ′ ) ⋅ 1 = ∑ i = 1 m σ i ′ ⋅ m o d ( ⌊ σ j ⋅ 1 σ i s ′ ⌋ , s i ′ ) = σ j M ⋅ 1
+
+Therefore, by linearity, σ B = σ M .
+
+This proves that σ B is the only merge stride that can potentially merge two shapes.
+0xekez
+0xekez commented on Feb 21, 2025
+0xekez
+on Feb 21, 2025
+
+Hi @a-soulspark and @Nielius, thanks for your notes so far, I was reading through them this morning and wondered if you have considered a more "linear algebra" formulation of this. I'm not familiar with Tinygrad, but it feels to me like much of what you're discussing could be phrased as follows:
+
+    Suppose we have a view of a tensor f : N n → N mapping indices in the tensor to their position in row-major storage. Based on what's being said, it seems views are linear transformations, so we have f ( x ) = A x + b for some 1 × n matrix A and scalar b .
+    Now suppose we apply a transform g : N n → N m mapping indices in the tensor to new ones. My claim is g can be written in the same way as f , so let g ( x ) = M x + c for some m × n matrix M and m × 1 vector c . In the case of something like a transpose, M would be a permutation matrix and its fairly straightforward to see how this could also represent a flatten. I assume every transform in Tinygrad can be written like this, but I could be wrong.
+    Our question about mergability then reduces to: is there an affine transformation L : N M → N s.t. L ( g ( x ) ) = f ( x ) . I.e. is there a view which preserves the mapping between indices and their position in row-major storage.
+    Determining if L exists is fairly straightforward. Let L ( x ) = α x + β for some 1 × m matrix α and scalar β . By plugging in definitions, we have L ( g ( x ) ) = f ( x ) iff α M x + ( α c + β ) = A x + b . This has a solution iff there is a value of α satisfying α M = A , i.e. if A is in the row space of M . Of course, we can use standard Gaussian elimination to solve this.
+
+This method seems to satisfy necessary/sufficient, as it just asks about the existence of this affine transformation L (the merged view). I am not familiar enough with Tinygrad to follow the "accidentally coincide" example, but I'd imagine it will be handled by this.
+
+Let me know what you think. I've written out an example using this below.
+Example
+
+Here's an example of using this to get a view of a transposed tensor, then flattening it and showing the views are not mergable.
+
+Consider a tensor T of shape ( 2 , 3 ) stored in row-major order. The mapping from a 2D index ( i , j ) to its memory position is given by the affine function f ( i , j ) = 3 i + j . We can express this in vector form as
+f ( x ) = A x + b ,
+
+with
+x = ( i j ) , A = [ 3 1 ] , b = 0.
+
+The transpose T T is obtained by swapping the indices:
+f T ( i , j ) = f ( j , i ) = 3 j + i .
+
+Which can be represented in matrix form with the permutation matrix
+P = ( 0 1 1 0 ) ,
+
+so the transform
+g ( x ) = P x
+
+trivially yields the merged view
+f T ( x ) = f ( P x ) = A ( P x ) = ( A P ) x .
+
+Where
+A P = [ 3 1 ] ( 0 1 1 0 ) = [ 1 3 ] .
+
+Next, suppose we flatten T T (which now has shape ( 3 , 2 ) ) in row-major order (hint: these views will not be mergable). The flattening is an affine mapping:
+h ( i , j ) = 2 i + j ,
+
+or in vector form,
+h ( x ) = Q x ,
+
+with
+Q = [ 2 1 ] .
+
+We now ask whether there exists an affine mapping
+L ( z ) = α z + β ,
+
+with α ∈ Z (a scalar) and β ∈ Z , such that for all x ∈ Z 2
+L ( h ( x ) ) = f T ( x ) .
+
+In terms of our mappings, this means:
+L ( Q x ) = ( A P ) x .
+
+Writing L ( Q x ) = α ( Q x ) + β and requiring the equality to hold for every x , we equate the coefficients:
+α Q = A P and β = 0.
+
+Substituting the known values:
+α [ 2 1 ] = [ 1 3 ] .
+
+This gives the system of equations:
+2 α = 1 and α = 3.
+
+Here, we see no such α exists even without gaussian elimination, since 2 α = 1 implies α = 1 2 while the second equation requires α = 3 , there is no scalar α that satisfies both.
+
+Thus, no affine mapping (L) exists that makes
+L ( h ( x ) ) = f T ( x )
+
+hold for all x .
+pikhan
+pikhan commented on Mar 4, 2025
+pikhan
+on Mar 4, 2025
+
+@0xekez Correct me if I'm wrong, I am a little rusty, but there are a few errors I notice. One, in the very beginning in point 4 you write that a solution exists iff α M = A . This is not true, α c + β = b is not trivial. I think you forget that α is not scalar. Later down in your given example, this same mistake is made where you write the linear transformation form for the merged affine mapping L but forget that α is not a scalar. Correcting this, there are actually infinitely many affine mappings that hold true as a valid merged ShapeTracker.
+
+I will spend some more time thinking about this, its an interesting problem. I think @Nielius and @a-soulspark have gotten the core approach down.
+
+The bounty problem is then, given two (piecewise)-affine views v and w , when does their composition, with an unravel step in between, remain (piecewise)-affine? I say piecewise-affine instead of globally affine only to account for the case of masks, but ignoring this, all primitive views except shrink are not just globally affine but also linear.
+
+Views in tinygrad only transform logical coordinates to their 1d memory offsets by multiplying and combining strides (plus or minus a constant), and thus are necessarily affine. Furthermore, single views are free to be essentially any affine function of appropriate size and so the only critical constraint is that the composition of views (with unravel steps in between) remains affine. We need only prove for the case of pairs of arbitrary views (not just the primitives) for then by the associativity of composition we know it is true for any n-composition of views as well. It would be really nice if this turned out to be true very generally.
+
+My understanding is that this is actually somewhat of a common problem in mathematics in which affine v , w , and non-affine U form an affine v U w in precisely that "accidental" way @Nielius described. I think @a-soulspark 's approach of quantifying when you can't "wrap back" is exactly what is needed. It is getting late for me and I'll read this again later to verify for myself the claim that if two views are mergeable they are only by the given stride formula. I think this might need some changing and in general a transition from the linear condition to the more lax affine one.
+
+It has been, however, over two months since the last post on this and I was thinking before I saw these posts to spend some time on it as well. Also wanted an excuse to learn Lean, wondering where you all are at and if you would welcome an additional hand or are basically already at the finish line?
+0xekez
+0xekez commented on Mar 4, 2025
+0xekez
+on Mar 4, 2025
+
+Hi @pikhan, thanks for taking the time to read through.
+
+    in the very beginning in point 4 you write that a solution exists iff α M = A . This is not true, α c + β = b is not trivial. I think you forget that α is not scalar.
+
+In my example, α is 1 × m and c is m × 1 . Neither is a scalar, but their product, α c , is (the resulting shape is 1 × 1 ), this is why I think picking a β satisfying the relation is trivial.
+
+The shapes here are fairly subtle, so let me know if you still think I have something wrong.
+pikhan
+pikhan commented on Mar 4, 2025
+pikhan
+on Mar 4, 2025 · edited by pikhan
+
+My apologies, I had skimmed through and didn't notice that. However, later in your example you ask about proving whether or not an affine mapping L = α z + β exists where α is scalar. I believe that α should not be scalar.
+pikhan
+pikhan commented on Mar 4, 2025
+pikhan
+on Mar 4, 2025
+
+I think in general what is missing from your approach is that (generally) non-affine unravel function. A view is an affine transformation (typo where you say linear but then write an affine function), yes, but the question is if every (not necessarily primitive) view in tinygrad can be merged or composed into a single view as given as a ShapeTracker. Your transform approach definition skips the actual composition definition of two views by defining g like f but from N n → N m . You say two views are mergeable if there exists a view L such L ( g ( x ) ) = f ( x ) ) . But what we really need to say is that two views are mergeable if there exists a view L : N m → N such that L = g ∘ U ∘ f where g is another view N m → N and f is N n → N where U is the unravel function N → N m . Correct me if I am wrong, as I said I am a bit rusty.
+0xekez
+0xekez commented on Mar 4, 2025
+0xekez
+on Mar 4, 2025 · edited by 0xekez
+
+@pikhan, thanks for pointing out the linear vs affine typo, and it's nice of you to take the time to read through my comments and find their issues. I think α being a scalar in this case is just a consequence of m being 1, as the flatten takes us back down to 1 dimension.
+
+I am not sure I follow the need for an unravel function - fwiw, I only have a basic understanding of tinygrad. I think we are on the same page that a view is a mapping N n → N which maps n -dimensional indices into a tensor to their flat representation in memory; Where we may differ is our model of transforms. As I see it a transform is an affine mapping N n → N m which maps n -dimensional indices into a tensor to new, m -dimensional ones (I don't see any obvious reason the transforms in the shapetracker are incompatible with this). This in mind, the "merged" view is just L as I have described above, a mapping taking the new m -dimensional indices to the same position in memory as their corresponding n -dimensional ones.
+
+Let me know what you think.
+pikhan
+pikhan commented on Mar 4, 2025
+pikhan
+on Mar 4, 2025
+
+Sorry, I think I am missing something obvious here. I see that m = 1 in your example now. f gives you a view of the original tensor, f T being the view for the transform, and h being the view for a generic flattened tensor of shape (2,3). You then ask if there exists an affine map L such that L composed with h gets you the transposed view. But don't we want to show instead there exists an affine map L (a merged view) that is equal to the composition of the transposition and the flattening? This composition is what involves the unravel step because the dimension of the arguments of each of the view functions are in general not the same. By asking if there is an affine L for whom the composition with h is f T , since affine functions are invertible, you are really asking for the existence of an L − 1 for whom h = L − 1 ∘ f T , but h is the view for the flattened tensor before the transposition so this is not what we are looking for, even though it looks close. Regardless, I dont think we can compose views like that without an unravel in between. Apologies for the confusion on my end, let me know if I am still missing something. Have you tried your counterexample programmatically?
+pikhan
+pikhan commented on Mar 4, 2025
+pikhan
+on Mar 4, 2025 · edited by pikhan
+
+I think we are modeling the "transforms" differently. My nomenclature may be inaccurate but my understanding was that as far as shapetrackers were concerned, padding, shrinking, reshaping etc. are all views collected together in a multi-view and we wish to merge these into a single "view" where a view is actually a function from the logical coordinates to their 1d memory offsets (from the n-dimensional indices to the natural numbers). The underlying data of the tensor is unmodified, its shape is unmodified, but its strides however are modified by these view operations. So the transforms are not functions from I n → I m but simply views from I m → N . To go from a view I n → N and compose with another view from I m → N is why you need that unravel between N and I m .
+Nielius
+Nielius commented on Mar 5, 2025
+Nielius
+on Mar 5, 2025
+
+Hey everyone,
+
+I've been working on this for some time now, and have an almost complete proof in Lean: see my repo.
+
+I wrote down an easy example here that shows some of the difficulties that you encounter, and also shows what I meant by the "accidental" setup. It shows that it's not as simple as (affine) linear algebra, and you need to check when you get overflows in mixed radix numeral systems.
+
+The main things that are missing are offsets and masks (they won't change the general setup, but it will be quite a lot of work to add that to the formalism), and there are some lemmas whose proofs are not yet done, but I'm very confident that they can be done. The main positive is that it is a computational criterion for when two views are mergeable; it is easy to implement, but unfortunately there is a lot to check.
+
+If any of you want to contribute, you're more than welcome! You can search for sorry (that indicates that a proof was not finished) and try to fill in the proof.
+
+I really underestimated how much work this was going to be. I was familiar with Coq, not super familiar with Lean, and I think I've at least spend 100 hours on this, maybe more, over the course of more than two months. Formalizing in Lean takes a lot more time than writing down mathematics...
+Nielius
+Nielius commented on Mar 5, 2025
+Nielius
+on Mar 5, 2025
+
+Some comments from me on the discussion above:
+
+    I haven't read the discussion between @pikhan and @0xekez very carefully, but I agree with this comment: you need the unravel function, because every view is a map to Nat (not to some I n ). And the unravel function is what gives most of the problems, as you can see in this example
+    this comment by @a-soulspark is also useful. A short formulation would be: you can discover the stride of the merged view by evaluating on one-hot tensors.
+
+pikhan
+pikhan commented on Mar 5, 2025
+pikhan
+on Mar 5, 2025
+
+Oh wow! That is indeed a lot of work, congratulations! I'd be more than happy to help out where I can with the Lean proofs and maybe adding that blurb on merging more than two views. I'll open a pull request when I look through this all in a little bit more detail and add some work into it.
