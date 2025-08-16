@@ -1,8 +1,9 @@
 from typing import Literal, Callable, cast
-import os, math, sys
+import os, math, sys, struct
 from collections import defaultdict, Counter
 from tinygrad.opt import tc
 from tinygrad.uop.ops import GroupOp, Ops, UOp, PatternMatcher, UPat
+from tinygrad.uop import Ops
 from tinygrad.helpers import strip_parens, getenv, prod, dedup, AMX
 from tinygrad.dtype import ImageDType, dtypes, DType, PtrDType, AddrSpace, truncate
 from tinygrad.renderer import Renderer
@@ -238,8 +239,18 @@ class OpenCLRenderer(CStyleLanguage):
     self.device = device
     super().__init__()
     if self.device and 'cl_khr_fp16' not in self.device.device_exts:
-      self.type_map[dtypes.half] = "float"
-      self.extra_matcher = PatternMatcher([(UPat(dtype=dtypes.half, name="x"), lambda x: x.cast(dtypes.float))]) + self.extra_matcher
+      # No native fp16: keep memory/storage as 16-bit (ushort) and avoid generating half in the kernel.
+      # WHERE on half doesn't require arithmetic; it can select raw 16-bit payloads correctly.
+      self.type_map[dtypes.half] = "ushort"
+      # Render half constants as their IEEE-754 half bit-patterns in a 16-bit integer literal.
+      def _const_half_bits(ctx, x):
+        # x.arg is a Python float; pack to IEEE-754 half, then render as 0xXXXX ushort.
+        hb = struct.unpack('<H', struct.pack('<e', float(x.arg)))[0]
+        return f"(({ctx.render_dtype(x.dtype)})0x{hb:04x})"
+      self.string_rewrite = PatternMatcher([
+        (UPat(Ops.CONST, dtype=dtypes.half, name="x"), _const_half_bits),
+      ]) + self.string_rewrite
+      
 
   # language options
   kernel_typedef = "__kernel void"
@@ -264,8 +275,51 @@ class OpenCLRenderer(CStyleLanguage):
   ]) + base_rewrite
 
   def render_kernel(self, function_name, kernel, bufs, uops, prefix=None) -> str:
-    if self.device and 'cl_khr_fp16' in self.device.device_exts and any(uop.dtype.base == dtypes.half for uop in uops):
-      prefix = (["#pragma OPENCL EXTENSION cl_khr_fp16 : enable"] + (prefix or []))
+    if self.device and any(uop.dtype.base == dtypes.half for uop in uops):
+      if 'cl_khr_fp16' in self.device.device_exts:
+        prefix = (["#pragma OPENCL EXTENSION cl_khr_fp16 : enable"] + (prefix or []))
+      else:
+        # Inject float<->half helpers when fp16 extension is missing
+        helpers = [
+          "static inline float half_to_float_bits(ushort h){",
+          "  uint s = (h & 0x8000) << 16;",
+          "  uint e = (h >> 10) & 0x1F;",
+          "  uint m = h & 0x3FF;",
+          "  uint f;",
+          "  if (e == 0){",
+          "    if (m == 0){ f = s; } else {",
+          "      // normalize subnormal",
+          "      while ((m & 0x400) == 0){ m <<= 1; e--; }",
+          "      m &= 0x3FF;",
+          "      uint fe = (uint)(e + (127 - 15));",
+          "      f = s | (fe << 23) | (m << 13);",
+          "    }",
+          "  } else if (e == 31){",
+          "    f = s | 0x7F800000 | (m << 13);",
+          "  } else {",
+          "    uint fe = (uint)(e + (127 - 15));",
+          "    f = s | (fe << 23) | (m << 13);",
+          "  }",
+          "  return as_float(f);",
+          "}",
+          "static inline ushort float_to_half_bits(float x){",
+          "  uint f = as_uint(x);",
+          "  uint s = (f >> 16) & 0x8000;",
+          "  int e = (int)((f >> 23) & 0xFF) - 127 + 15;",
+          "  uint m = f & 0x7FFFFF;",
+          "  ushort h;",
+          "  if (e <= 0){",
+          "    if (e < -10){ h = (ushort)s; }",
+          "    else { m = (m | 0x00800000) >> (1 - e); h = (ushort)(s | ((m + 0x00001000) >> 13)); }",
+          "  } else if (e >= 31){",
+          "    h = (ushort)(s | 0x7C00);",
+          "  } else {",
+          "    h = (ushort)(s | ((e & 0x1F) << 10) | ((m + 0x00001000) >> 13));",
+          "  }",
+          "  return h;",
+          "}",
+        ]
+        prefix = (helpers + (prefix or []))
     return super().render_kernel(function_name, kernel, bufs, uops, prefix)
 
 class IntelRenderer(OpenCLRenderer):

@@ -107,11 +107,17 @@ from tinygrad.opt.search import _ensure_buffer_alloc, _time_program
 from tinygrad.helpers import to_function_name, CACHELEVEL, diskcache_get, diskcache_put
 
 def time_linearizer(lin:Kernel, rawbufs:list[Buffer], allow_test_size=True, max_global_size=65536, cnt=3, disable_cache=False, clear_l2=False) -> float:  # noqa: E501
+  # normalize device to a canonical string for stable cache keys
+  _dev = lin.opts.device
+  if not isinstance(_dev, str) and hasattr(_dev, 'device'):
+    _dev = getattr(_dev, 'device')
+  if not isinstance(_dev, str):
+    _dev = str(_dev)
   key = {"ast": lin.ast.key, "opts": str(lin.applied_opts), "allow_test_size": allow_test_size,
-         "max_global_size": max_global_size, "clear_l2": clear_l2, "device": lin.opts.device, "suffix": lin.opts.suffix}
+         "max_global_size": max_global_size, "clear_l2": clear_l2, "device": _dev, "suffix": lin.opts.suffix}
   if not disable_cache and CACHELEVEL >= 2 and (val:=diskcache_get("time_linearizer", key)) is not None: return min(val)
 
-  dev = Device[lin.opts.device]
+  dev = Device[_dev]
   assert dev.compiler is not None
 
   rawbufs = _ensure_buffer_alloc(rawbufs)

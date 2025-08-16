@@ -16,7 +16,15 @@ class _Device:
     self._devices = [x.stem[len("ops_"):].upper() for x in (pathlib.Path(__file__).parent/"runtime").iterdir() if x.stem.startswith("ops_")]
     self._opened_devices:set[str] = set()
   @functools.cache  # this class is a singleton, pylint: disable=method-cache-max-size-none
-  def _canonicalize(self, device:str) -> str: return re.sub(r":0$", "", (d:=device.split(":", 1)[0].upper()) + device[len(d):])
+  def _canonicalize(self, device:str) -> str:
+    # allow passing a Renderer or other object with a `.device` string
+    if not isinstance(device, str) and hasattr(device, 'device'):
+      device = getattr(device, 'device')
+    # fallback to string only as last resort (should be a proper device string like 'GPU', 'CUDA:0', ...)
+    if not isinstance(device, str):
+      device = str(device)
+    d = device.split(":", 1)[0].upper()
+    return re.sub(r":0$", "", d + device[len(d):])
   # NOTE: you can't cache canonicalize in case Device.DEFAULT changes
   def canonicalize(self, device:str|None) -> str: return self._canonicalize(device if device is not None else Device.DEFAULT)
   def __getitem__(self, ix:str) -> Compiled: return self.__get_canonicalized_item(self.canonicalize(ix))
@@ -317,7 +325,13 @@ def is_dtype_supported(dtype:DType, device:str|None=None) -> bool:
   # CI CUDA architecture is sm_35 but we need at least sm_70 to run fp16 ALUs
   # PYTHON supports half memoryview in 3.12+ https://github.com/python/cpython/issues/90751
   if dtype == dtypes.half:
-    if device == "GPU": return not CI and not OSX
+    if device == "GPU":
+      # Only claim fp16 support if the OpenCL device exposes cl_khr_fp16.
+      try:
+        exts = getattr(Device[device], 'device_exts', '')
+      except Exception:
+        exts = ''
+      return (not CI) and (not OSX) and ('cl_khr_fp16' in exts)
     if device in ["CUDA", "NV"]: return not CI
     if device == "LLVM": return OSX
     if device == "PYTHON": return sys.version_info >= (3, 12)

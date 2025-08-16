@@ -47,7 +47,10 @@ def _time_program(p:ProgramSpec, lib:bytes, var_vals:dict[Variable, int], rawbuf
   input_bufs = [rawbufs[i] for i in car.p.globals]
   for _ in range(cnt):
     if clear_l2:
-      if hasattr(dev:=Device[p.device], 'invalidate_caches'): dev.invalidate_caches()
+      _dev = p.device
+      if not isinstance(_dev, str) and hasattr(_dev, 'device'):
+        _dev = getattr(_dev, 'device')
+      if hasattr(dev:=Device[_dev], 'invalidate_caches'): dev.invalidate_caches()
       else:
         with Context(DEBUG=0, BEAM=0, CAPTURING=0, TRACK_MATCH_STATS=0): Tensor.ones(1024,1024).contiguous().realize(do_update_stats=False)
     tms.append(cast(float, car(input_bufs, var_vals, wait=True))*factor)
@@ -103,7 +106,10 @@ def bufs_from_lin(lin:Kernel, allocate:bool=True) -> list[Buffer]:
     assert isinstance(dtype, (PtrDType, ImageDType))
     if buf_size == 0: buf_size = 1  # create a size 1 buffer if no cell is accessed in kernel. # TODO: remove from kernel input in this case.
     buf_dtype = dtype if isinstance(dtype, ImageDType) else dtype.base
-    rawbufs[k] = Buffer(lin.opts.device, buf_size, buf_dtype).allocate() if allocate else Buffer(lin.opts.device, buf_size, buf_dtype)
+    device = lin.opts.device
+    if not isinstance(device, str) and hasattr(device, 'device'):
+      device = device.device
+    rawbufs[k] = Buffer(device, buf_size, buf_dtype).allocate() if allocate else Buffer(device, buf_size, buf_dtype)
   #assert all(r is not None for r in rawbufs)
   return cast(list[Buffer], rawbufs)
 
@@ -141,7 +147,10 @@ def get_kernel_actions(lin:Kernel, include_0=True) -> dict[int, Kernel]:
 beam_pool, BEAM_DEBUG = None, getenv("BEAM_DEBUG")
 def beam_search(lin:Kernel, rawbufs:list[Buffer], amt:int, allow_test_size=True, disable_cache=IGNORE_BEAM_CACHE.value) -> Kernel:
   global beam_pool
-  key = {"ast": lin.ast.key, "amt": amt, "allow_test_size": allow_test_size, "device": lin.opts.device, "suffix": lin.opts.suffix}
+  _dev = lin.opts.device
+  if not isinstance(_dev, str) and hasattr(_dev, 'device'):
+    _dev = _dev.device
+  key = {"ast": lin.ast.key, "amt": amt, "allow_test_size": allow_test_size, "device": _dev, "suffix": lin.opts.suffix}
   if not disable_cache and CACHELEVEL >= 1 and (val:=diskcache_get("beam_search", key)) is not None:
     ret = lin.copy()
     for o in val[len(lin.applied_opts):]: ret.apply_opt(o)
@@ -150,7 +159,7 @@ def beam_search(lin:Kernel, rawbufs:list[Buffer], amt:int, allow_test_size=True,
   beam: list[tuple[Kernel, float]] = [(lin, float("inf"))]
   seen_libs = set()
 
-  default_parallel = multiprocessing.cpu_count() if lin.opts.device in {"CUDA", "AMD", "NV", "METAL", "HIP"} else 0
+  default_parallel = multiprocessing.cpu_count() if _dev in {"CUDA", "AMD", "NV", "METAL", "HIP"} else 0
   if beam_pool is None and (workers := getenv("PARALLEL", default_parallel)):
     beam_pool = multiprocessing.get_context("spawn").Pool(workers, _init_worker, (), getenv("BEAM_MAX_TASKS_PER_CHILD", 16))
     @atexit.register
@@ -164,7 +173,10 @@ def beam_search(lin:Kernel, rawbufs:list[Buffer], amt:int, allow_test_size=True,
     rawbufs = _ensure_buffer_alloc(rawbufs)
     var_vals: dict[Variable, int] = {k:int(k.vmax+k.vmin)//2 for k in lin.ast.variables()}
     exiting, st = False, time.perf_counter()
-    dev = Device[lin.opts.device]
+    device = lin.opts.device
+    if not isinstance(device, str) and hasattr(device, 'device'):
+      device = device.device
+    dev = Device[device]
     while not exiting:
       acted_lins: list[Kernel] = flatten([get_kernel_actions(lin, include_0=False).values() for lin,_ in beam])
       timed_lins: list[tuple[Kernel, float]] = []
